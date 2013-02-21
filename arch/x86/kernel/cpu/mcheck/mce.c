@@ -91,6 +91,9 @@ static void default_decode_mce(struct mce *m)
 	pr_emerg("Run the message through 'mcelog --ascii' to decode.\n");
 }
 
+void				(*mce_cpu_specific_poll)(struct mce *);
+EXPORT_SYMBOL_GPL(mce_cpu_specific_poll);
+
 /*
  * CPU/chipset specific EDAC code can register a callback here to print
  * MCE errors in a human-readable form:
@@ -350,6 +353,11 @@ static void mce_wrmsrl(u32 msr, u64 v)
 	wrmsrl(msr, v);
 }
 
+static int under_injection(void)
+{
+	return __get_cpu_var(injectm).finished;
+}
+
 /*
  * Simple lockless ring to communicate PFNs from the exception handler with the
  * process context work function. This is vastly simplified because there's
@@ -447,7 +455,9 @@ static inline void mce_get_rip(struct mce *m, struct pt_regs *regs)
  */
 asmlinkage void smp_mce_self_interrupt(struct pt_regs *regs)
 {
+#ifndef CONFIG_XEN
 	ack_APIC_irq();
+#endif
 	exit_idle();
 	irq_enter();
 	mce_notify_irq();
@@ -470,7 +480,7 @@ static void mce_report_event(struct pt_regs *regs)
 		return;
 	}
 
-#ifdef CONFIG_X86_LOCAL_APIC
+#if defined(CONFIG_X86_LOCAL_APIC) && !defined(CONFIG_XEN)
 	/*
 	 * Without APIC do not notify. The event will be picked
 	 * up eventually.
@@ -553,6 +563,10 @@ void machine_check_poll(enum mcp_flags flags, mce_banks_t *b)
 
 		if (!(flags & MCP_TIMESTAMP))
 			m.tsc = 0;
+
+		if (mce_cpu_specific_poll && !under_injection() && !mce_dont_log_ce)
+			mce_cpu_specific_poll(&m);
+
 		/*
 		 * Don't get the IP here because it's unlikely to
 		 * have anything to do with the actual error location.
@@ -1116,8 +1130,15 @@ void mce_log_therm_throt_event(__u64 status)
  * Periodic polling timer for "silent" machine check errors.  If the
  * poller finds an MCE, poll 2x faster.  When the poller finds no more
  * errors, poll 2x slower (up to check_interval seconds).
+ *
+ * We will disable polling in DOM0 since all CMCI/Polling
+ * mechanism will be done in XEN for Intel CPUs
  */
+#if defined (CONFIG_X86_XEN_MCE)
+static int check_interval = 0; /* disable polling */
+#else
 static int check_interval = 5 * 60; /* 5 minutes */
+#endif
 
 static DEFINE_PER_CPU(int, mce_next_interval); /* in jiffies */
 static DEFINE_PER_CPU(struct timer_list, mce_timer);
@@ -1282,6 +1303,7 @@ static int __cpuinit mce_cpu_quirks(struct cpuinfo_x86 *c)
 
 	/* This should be disabled by the BIOS, but isn't always */
 	if (c->x86_vendor == X86_VENDOR_AMD) {
+#ifndef CONFIG_XEN
 		if (c->x86 == 15 && banks > 4) {
 			/*
 			 * disable GART TBL walk error reporting, which
@@ -1290,6 +1312,7 @@ static int __cpuinit mce_cpu_quirks(struct cpuinfo_x86 *c)
 			 */
 			clear_bit(10, (unsigned long *)&mce_banks[4].ctl);
 		}
+#endif
 		if (c->x86 <= 17 && mce_bootlog < 0) {
 			/*
 			 * Lots of broken BIOS around that don't clear them
@@ -1357,6 +1380,7 @@ static void __cpuinit mce_ancient_init(struct cpuinfo_x86 *c)
 
 static void mce_cpu_features(struct cpuinfo_x86 *c)
 {
+#ifndef CONFIG_X86_64_XEN
 	switch (c->x86_vendor) {
 	case X86_VENDOR_INTEL:
 		mce_intel_feature_init(c);
@@ -1367,6 +1391,7 @@ static void mce_cpu_features(struct cpuinfo_x86 *c)
 	default:
 		break;
 	}
+#endif
 }
 
 static void mce_init_timer(void)
@@ -1374,13 +1399,14 @@ static void mce_init_timer(void)
 	struct timer_list *t = &__get_cpu_var(mce_timer);
 	int *n = &__get_cpu_var(mce_next_interval);
 
+	setup_timer(t, mcheck_timer, smp_processor_id());
+
 	if (mce_ignore_ce)
 		return;
 
 	*n = check_interval * HZ;
 	if (!*n)
 		return;
-	setup_timer(t, mcheck_timer, smp_processor_id());
 	t->expires = round_jiffies(jiffies + *n);
 	add_timer_on(t, smp_processor_id());
 }
@@ -1991,9 +2017,11 @@ mce_cpu_callback(struct notifier_block *nfb, unsigned long action, void *hcpu)
 		break;
 	case CPU_DOWN_FAILED:
 	case CPU_DOWN_FAILED_FROZEN:
-		t->expires = round_jiffies(jiffies +
+		if (!mce_ignore_ce && check_interval) {
+			t->expires = round_jiffies(jiffies +
 					   __get_cpu_var(mce_next_interval));
-		add_timer_on(t, cpu);
+			add_timer_on(t, cpu);
+		}
 		smp_call_function_single(cpu, mce_reenable_cpu, &action, 1);
 		break;
 	case CPU_POST_DEAD:
@@ -2049,6 +2077,16 @@ static __init int mce_init_device(void)
 
 	register_hotcpu_notifier(&mce_cpu_notifier);
 	misc_register(&mce_log_device);
+
+#ifdef CONFIG_X86_XEN_MCE
+	if (is_initial_xendomain()) {
+		/* Register vIRQ handler for MCE LOG processing */
+		extern int bind_virq_for_mce(void);
+
+		printk(KERN_DEBUG "MCE: bind virq for DOM0 logging\n");
+		bind_virq_for_mce();
+	}
+#endif
 
 	return err;
 }

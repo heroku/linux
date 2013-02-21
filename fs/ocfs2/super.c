@@ -41,6 +41,7 @@
 #include <linux/mount.h>
 #include <linux/seq_file.h>
 #include <linux/quotaops.h>
+#include <linux/precache.h>
 #include <linux/smp_lock.h>
 
 #define MLOG_MASK_PREFIX ML_SUPER
@@ -701,6 +702,10 @@ unlock_osb:
 
 		if (!ocfs2_is_hard_readonly(osb))
 			ocfs2_set_journal_params(osb);
+
+		sb->s_flags = (sb->s_flags & ~MS_POSIXACL) |
+			((osb->s_mount_opt & OCFS2_MOUNT_POSIX_ACL) ?
+							MS_POSIXACL : 0);
 	}
 out:
 	unlock_kernel();
@@ -2228,6 +2233,7 @@ static int ocfs2_initialize_super(struct super_block *sb,
 		mlog_errno(status);
 		goto bail;
 	}
+	shared_precache_init(sb, &di->id2.i_super.s_uuid[0]);
 
 bail:
 	mlog_exit(status);

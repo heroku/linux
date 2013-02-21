@@ -241,7 +241,7 @@ and is between 256 and 4096 characters. It is defined in the file
 
 	acpi_sleep=	[HW,ACPI] Sleep options
 			Format: { s3_bios, s3_mode, s3_beep, s4_nohwsig,
-				  old_ordering, s4_nonvs }
+				  old_ordering, s4_nonvs, sci_force_enable }
 			See Documentation/power/video.txt for information on
 			s3_bios and s3_mode.
 			s3_beep is for debugging; it makes the PC's speaker beep
@@ -254,6 +254,9 @@ and is between 256 and 4096 characters. It is defined in the file
 			of _PTS is used by default).
 			s4_nonvs prevents the kernel from saving/restoring the
 			ACPI NVS memory during hibernation.
+			sci_force_enable causes the kernel to set SCI_EN directly
+			on resume from S1/S3 (which is against the ACPI spec,
+			but some broken systems don't work without it).
 
 	acpi_use_timer_override [HW,ACPI]
 			Use timer override. For some broken Nvidia NF5 boards
@@ -803,6 +806,24 @@ and is between 256 and 4096 characters. It is defined in the file
 	gpt		[EFI] Forces disk with valid GPT signature but
 			invalid Protective MBR to be treated as GPT.
 
+	guestdev=	[PCI,ACPI,XEN]
+			Format: {<device path>|<sbdf>}][,{<device path>|<sbdf>}[,...]]
+			Format of device path: <hid>[:<uid>]-<dev>.<func>[-<dev>.<func>[,...]][+iomul]
+			Format of sbdf: [<segment>:]<bus>:<dev>.<func>[+iomul]
+			Specifies PCI device for guest domain.
+			If PCI-PCI bridge is specified, all PCI devices
+			behind PCI-PCI bridge are reserved.
+			+iomul means that this PCI function will share
+			IO ports with other +iomul functions under same
+			switch. NOTE: if +iomul is specfied, all the functions
+			of the device will share IO ports.
+
+	guestiomuldev=	[PCI,ACPI,XEN]
+			Format: [sbd][,<sbd>][,...]
+			Format of sbdf: [<segment>:]<bus>:<dev>
+			Note: function shouldn't be specified.
+			Specifies PCI device for IO port multiplexing driver.
+
 	gvp11=		[HW,SCSI]
 
 	hashdist=	[KNL,NUMA] Large hashes allocated during boot
@@ -875,6 +896,7 @@ and is between 256 and 4096 characters. It is defined in the file
 	i8042.panicblink=
 			[HW] Frequency with which keyboard LEDs should blink
 			     when kernel panics (default is 0.5 sec)
+	i8042.notimeout	[HW] Ignore timeout condition signalled by conroller
 	i8042.reset	[HW] Reset the controller during init and cleanup
 	i8042.unlock	[HW] Unlock (ignore) the keylock
 
@@ -1622,7 +1644,7 @@ and is between 256 and 4096 characters. It is defined in the file
 
 	noclflush	[BUGS=X86] Don't use the CLFLUSH instruction
 
-	nodelayacct	[KNL] Disable per-task delay accounting
+	delayacct	[KNL] Enable per-task delay accounting
 
 	nodisconnect	[HW,SCSI,M68K] Disables SCSI disconnects.
 
@@ -1720,6 +1742,11 @@ and is between 256 and 4096 characters. It is defined in the file
 			with UP alternatives
 
 	noresidual	[PPC] Don't use residual data on PReP machines.
+
+	nordrand	[X86] Disable the direct use of the RDRAND
+			instruction even if it is supported by the
+			processor.  RDRAND is still available to user
+			space applications.
 
 	noresume	[SWSUSP] Disables resume and restores original swap
 			space.
@@ -1960,6 +1987,13 @@ and is between 256 and 4096 characters. It is defined in the file
 				off: Turn ECRC off
 				on: Turn ECRC on.
 
+	pci_reserve=	[PCI]
+			Format: [<sbdf>[+IO<size>][+MEM<size>]][,<sbdf>...]
+			Format of sbdf: [<segment>:]<bus>:<dev>.<func>
+			Specifies the least reserved io size or memory size
+			which is assigned to PCI bridge even when no child
+			pci device exists. This is useful with PCI hotplug.
+
 	pcie_aspm=	[PCIE] Forcibly enable or disable PCIe Active State Power
 			Management.
 		off	Disable ASPM.
@@ -2113,6 +2147,10 @@ and is between 256 and 4096 characters. It is defined in the file
 			Format: <full_path>
 			Run specified binary instead of /init from the ramdisk,
 			used for early userspace startup. See initrd.
+
+	reassign_resources	[PCI,ACPI,XEN]
+			Use guestdev= parameter to reassign device's
+			resources.
 
 	reboot=		[BUGS=X86-32,BUGS=ARM,BUGS=IA-64] Rebooting mode
 			Format: <reboot_mode>[,<reboot_mode2>[,...]]
@@ -2574,6 +2612,10 @@ and is between 256 and 4096 characters. It is defined in the file
 			disables clocksource verification at runtime.
 			Used to enable high-resolution timer mode on older
 			hardware, and in virtualized environment.
+			[x86] noirqtime: Do not use TSC to do irq accounting.
+			Used to run time disable IRQ_TIME_ACCOUNTING on any
+			platforms where RDTSC is slow and this accounting
+			can add overhead.
 
 	turbografx.map[2|3]=	[HW,JOY]
 			TurboGraFX parallel port interface
@@ -2645,6 +2687,8 @@ and is between 256 and 4096 characters. It is defined in the file
 			to a common usb-storage quirk flag as follows:
 				a = SANE_SENSE (collect more than 18 bytes
 					of sense data);
+				b = BAD_SENSE (don't collect more than 18
+					bytes of sense data);
 				c = FIX_CAPACITY (decrease the reported
 					device capacity by one sector);
 				h = CAPACITY_HEURISTICS (decrease the
@@ -2665,6 +2709,13 @@ and is between 256 and 4096 characters. It is defined in the file
 				w = NO_WP_DETECT (don't test whether the
 					medium is write-protected).
 			Example: quirks=0419:aaf5:rl,0421:0433:rc
+
+	userpte=
+			[X86] Flags controlling user PTE allocations.
+
+				nohigh = do not allocate PTE pages in
+					HIGHMEM regardless of setting
+					of CONFIG_HIGHPTE.
 
 	vdso=		[X86,SH]
 			vdso=2: enable compat VDSO (default with COMPAT_VDSO)

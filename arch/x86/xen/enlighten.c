@@ -48,6 +48,7 @@
 #include <asm/traps.h>
 #include <asm/setup.h>
 #include <asm/desc.h>
+#include <asm/pgalloc.h>
 #include <asm/pgtable.h>
 #include <asm/tlbflush.h>
 #include <asm/reboot.h>
@@ -138,24 +139,23 @@ static void xen_vcpu_setup(int cpu)
  */
 void xen_vcpu_restore(void)
 {
-	if (have_vcpu_info_placement) {
-		int cpu;
+	int cpu;
 
-		for_each_online_cpu(cpu) {
-			bool other_cpu = (cpu != smp_processor_id());
+	for_each_online_cpu(cpu) {
+		bool other_cpu = (cpu != smp_processor_id());
 
-			if (other_cpu &&
-			    HYPERVISOR_vcpu_op(VCPUOP_down, cpu, NULL))
-				BUG();
+		if (other_cpu &&
+		    HYPERVISOR_vcpu_op(VCPUOP_down, cpu, NULL))
+			BUG();
 
+		xen_setup_runstate_info(cpu);
+
+		if (have_vcpu_info_placement)
 			xen_vcpu_setup(cpu);
 
-			if (other_cpu &&
-			    HYPERVISOR_vcpu_op(VCPUOP_up, cpu, NULL))
-				BUG();
-		}
-
-		BUG_ON(!have_vcpu_info_placement);
+		if (other_cpu &&
+		    HYPERVISOR_vcpu_op(VCPUOP_up, cpu, NULL))
+			BUG();
 	}
 }
 
@@ -213,6 +213,7 @@ static void xen_cpuid(unsigned int *ax, unsigned int *bx,
 static __init void xen_init_cpuid_mask(void)
 {
 	unsigned int ax, bx, cx, dx;
+	unsigned int xsave_mask;
 
 	cpuid_leaf1_edx_mask =
 		~((1 << X86_FEATURE_MCE)  |  /* disable MCE */
@@ -223,24 +224,16 @@ static __init void xen_init_cpuid_mask(void)
 		cpuid_leaf1_edx_mask &=
 			~((1 << X86_FEATURE_APIC) |  /* disable local APIC */
 			  (1 << X86_FEATURE_ACPI));  /* disable ACPI */
-
 	ax = 1;
-	cx = 0;
 	xen_cpuid(&ax, &bx, &cx, &dx);
 
-	/* cpuid claims we support xsave; try enabling it to see what happens */
-	if (cx & (1 << (X86_FEATURE_XSAVE % 32))) {
-		unsigned long cr4;
+	xsave_mask =
+		(1 << (X86_FEATURE_XSAVE % 32)) |
+		(1 << (X86_FEATURE_OSXSAVE % 32));
 
-		set_in_cr4(X86_CR4_OSXSAVE);
-		
-		cr4 = read_cr4();
-
-		if ((cr4 & X86_CR4_OSXSAVE) == 0)
-			cpuid_leaf1_ecx_mask &= ~(1 << (X86_FEATURE_XSAVE % 32));
-
-		clear_in_cr4(X86_CR4_OSXSAVE);
-	}
+	/* Xen will set CR4.OSXSAVE if supported and not disabled by force */
+	if ((cx & xsave_mask) != xsave_mask)
+		cpuid_leaf1_ecx_mask &= ~xsave_mask; /* disable XSAVE & OSXSAVE */
 }
 
 static void xen_set_debugreg(int reg, unsigned long val)
@@ -331,6 +324,24 @@ static void xen_set_ldt(const void *addr, unsigned entries)
 
 	xen_mc_issue(PARAVIRT_LAZY_CPU);
 }
+
+#ifdef CONFIG_X86_32
+static void xen_load_user_cs_desc(int cpu, struct mm_struct *mm)
+{
+	void *gdt;
+	xmaddr_t mgdt;
+	u64 descriptor;
+	struct desc_struct user_cs;
+
+	gdt = &get_cpu_gdt_table(cpu)[GDT_ENTRY_DEFAULT_USER_CS];
+	mgdt = virt_to_machine(gdt);
+
+	user_cs = mm->context.user_cs;
+	descriptor = (u64) user_cs.a | ((u64) user_cs.b) << 32;
+
+	HYPERVISOR_update_descriptor(mgdt.maddr, descriptor);
+}
+#endif /*CONFIG_X86_32*/
 
 static void xen_load_gdt(const struct desc_ptr *dtr)
 {
@@ -924,7 +935,7 @@ static const struct pv_init_ops xen_init_ops __initdata = {
 };
 
 static const struct pv_time_ops xen_time_ops __initdata = {
-	.sched_clock = xen_sched_clock,
+	.sched_clock = xen_clocksource_read,
 };
 
 static const struct pv_cpu_ops xen_cpu_ops __initdata = {
@@ -945,7 +956,10 @@ static const struct pv_cpu_ops xen_cpu_ops __initdata = {
 	.wbinvd = native_wbinvd,
 
 	.read_msr = native_read_msr_safe,
+	.rdmsr_regs = native_rdmsr_safe_regs,
 	.write_msr = xen_write_msr_safe,
+	.wrmsr_regs = native_wrmsr_safe_regs,
+
 	.read_tsc = native_read_tsc,
 	.read_pmc = native_read_pmc,
 
@@ -958,6 +972,9 @@ static const struct pv_cpu_ops xen_cpu_ops __initdata = {
 
 	.load_tr_desc = paravirt_nop,
 	.set_ldt = xen_set_ldt,
+#ifdef CONFIG_X86_32
+	.load_user_cs_desc = xen_load_user_cs_desc,
+#endif /*CONFIG_X86_32*/
 	.load_gdt = xen_load_gdt,
 	.load_idt = xen_load_idt,
 	.load_tls = xen_load_tls,
@@ -996,10 +1013,6 @@ static const struct pv_apic_ops xen_apic_ops __initdata = {
 static void xen_reboot(int reason)
 {
 	struct sched_shutdown r = { .reason = reason };
-
-#ifdef CONFIG_SMP
-	smp_send_stop();
-#endif
 
 	if (HYPERVISOR_sched_op(SCHEDOP_shutdown, &r))
 		BUG();
@@ -1093,6 +1106,12 @@ asmlinkage void __init xen_start_kernel(void)
 
 	__supported_pte_mask |= _PAGE_IOMAP;
 
+	/*
+	 * Prevent page tables from being allocated in highmem, even
+	 * if CONFIG_HIGHPTE is enabled.
+	 */
+	__userpte_alloc_gfp &= ~__GFP_HIGHMEM;
+
 #ifdef CONFIG_X86_64
 	/* Work out if we support NX */
 	check_efer();
@@ -1181,6 +1200,8 @@ asmlinkage void __init xen_start_kernel(void)
 	}
 
 	xen_raw_console_write("about to get started...\n");
+
+	xen_setup_runstate_info(0);
 
 	/* Start the world */
 #ifdef CONFIG_X86_32

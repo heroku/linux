@@ -14,11 +14,10 @@ CFLAGS_common.o		:= $(nostackp)
 obj-y			:= intel_cacheinfo.o addon_cpuid_features.o
 obj-y			+= proc.o capflags.o powerflags.o common.o
 obj-y			+= vmware.o hypervisor.o sched.o
+obj-y			+= rdrand.o
 
 obj-$(CONFIG_X86_32)	+= bugs.o cmpxchg.o
 obj-$(CONFIG_X86_64)	+= bugs_64.o
-
-obj-$(CONFIG_X86_CPU_DEBUG)		+= cpu_debug.o
 
 obj-$(CONFIG_CPU_SUP_INTEL)		+= intel.o
 obj-$(CONFIG_CPU_SUP_AMD)		+= amd.o
@@ -34,6 +33,8 @@ obj-$(CONFIG_MTRR)			+= mtrr/
 obj-$(CONFIG_CPU_FREQ)			+= cpufreq/
 
 obj-$(CONFIG_X86_LOCAL_APIC)		+= perfctr-watchdog.o
+
+disabled-obj-$(CONFIG_XEN) := hypervisor.o vmware.o sched.o perfctr-watchdog.o
 
 quiet_cmd_mkcapflags = MKCAP   $@
       cmd_mkcapflags = $(PERL) $(srctree)/$(src)/mkcapflags.pl $< $@

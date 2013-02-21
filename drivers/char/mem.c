@@ -35,6 +35,19 @@
 # include <linux/efi.h>
 #endif
 
+static inline unsigned long size_inside_page(unsigned long start,
+					     unsigned long size)
+{
+	unsigned long sz;
+
+	if (-start & (PAGE_SIZE - 1))
+		sz = -start & (PAGE_SIZE - 1);
+	else
+		sz = PAGE_SIZE;
+
+	return min_t(unsigned long, sz, size);
+}
+
 /*
  * Architectures vary in how they handle caching for addresses
  * outside of main memory.
@@ -110,6 +123,7 @@ void __attribute__((weak)) unxlate_dev_mem_ptr(unsigned long phys, void *addr)
 {
 }
 
+#ifndef ARCH_HAS_DEV_MEM
 /*
  * This funcion reads the *physical* memory. The f_pos points directly to the 
  * memory location. 
@@ -254,6 +268,7 @@ static ssize_t write_mem(struct file * file, const char __user * buf,
 	*ppos += written;
 	return written;
 }
+#endif
 
 int __attribute__((weak)) phys_mem_access_prot_allowed(struct file *file,
 	unsigned long pfn, unsigned long size, pgprot_t *vma_prot)
@@ -345,6 +360,9 @@ static int mmap_mem(struct file * file, struct vm_area_struct * vma)
 static int mmap_kmem(struct file * file, struct vm_area_struct * vma)
 {
 	unsigned long pfn;
+#ifdef CONFIG_XEN
+	unsigned long i, count;
+#endif
 
 	/* Turn a kernel-virtual address into a physical page frame */
 	pfn = __pa((u64)vma->vm_pgoff << PAGE_SHIFT) >> PAGE_SHIFT;
@@ -358,6 +376,13 @@ static int mmap_kmem(struct file * file, struct vm_area_struct * vma)
 	 */
 	if (!pfn_valid(pfn))
 		return -EIO;
+
+#ifdef CONFIG_XEN
+	count = (vma->vm_end - vma->vm_start) >> PAGE_SHIFT;
+	for (i = 0; i < count; i++)
+		if ((pfn + i) != mfn_to_local_pfn(pfn_to_mfn(pfn + i)))
+			return -EIO;
+#endif
 
 	vma->vm_pgoff = pfn;
 	return mmap_mem(file, vma);
@@ -408,6 +433,7 @@ static ssize_t read_kmem(struct file *file, char __user *buf,
 	unsigned long p = *ppos;
 	ssize_t low_count, read, sz;
 	char * kbuf; /* k-addr because vread() takes vmlist_lock rwlock */
+	int err = 0;
 
 	read = 0;
 	if (p < (unsigned long) high_memory) {
@@ -430,15 +456,7 @@ static ssize_t read_kmem(struct file *file, char __user *buf,
 		}
 #endif
 		while (low_count > 0) {
-			/*
-			 * Handle first page in case it's not aligned
-			 */
-			if (-p & (PAGE_SIZE - 1))
-				sz = -p & (PAGE_SIZE - 1);
-			else
-				sz = PAGE_SIZE;
-
-			sz = min_t(unsigned long, sz, low_count);
+			sz = size_inside_page(p, low_count);
 
 			/*
 			 * On ia64 if a page has been mapped somewhere as
@@ -462,16 +480,18 @@ static ssize_t read_kmem(struct file *file, char __user *buf,
 		if (!kbuf)
 			return -ENOMEM;
 		while (count > 0) {
-			int len = count;
+			int len = size_inside_page(p, count);
 
-			if (len > PAGE_SIZE)
-				len = PAGE_SIZE;
+			if (!is_vmalloc_or_module_addr((void *)p)) {
+				err = -ENXIO;
+				break;
+			}
 			len = vread(kbuf, (char *)p, len);
 			if (!len)
 				break;
 			if (copy_to_user(buf, kbuf, len)) {
-				free_page((unsigned long)kbuf);
-				return -EFAULT;
+				err = -EFAULT;
+				break;
 			}
 			count -= len;
 			buf += len;
@@ -480,8 +500,8 @@ static ssize_t read_kmem(struct file *file, char __user *buf,
 		}
 		free_page((unsigned long)kbuf);
 	}
- 	*ppos = p;
- 	return read;
+	*ppos = p;
+	return read ? read : err;
 }
 
 
@@ -510,15 +530,8 @@ do_write_kmem(void *p, unsigned long realp, const char __user * buf,
 
 	while (count > 0) {
 		char *ptr;
-		/*
-		 * Handle first page in case it's not aligned
-		 */
-		if (-realp & (PAGE_SIZE - 1))
-			sz = -realp & (PAGE_SIZE - 1);
-		else
-			sz = PAGE_SIZE;
 
-		sz = min_t(unsigned long, sz, count);
+		sz = size_inside_page(realp, count);
 
 		/*
 		 * On ia64 if a page has been mapped somewhere as
@@ -557,6 +570,7 @@ static ssize_t write_kmem(struct file * file, const char __user * buf,
 	ssize_t virtr = 0;
 	ssize_t written;
 	char * kbuf; /* k-addr because vwrite() takes vmlist_lock rwlock */
+	int err = 0;
 
 	if (p < (unsigned long) high_memory) {
 
@@ -578,20 +592,20 @@ static ssize_t write_kmem(struct file * file, const char __user * buf,
 		if (!kbuf)
 			return wrote ? wrote : -ENOMEM;
 		while (count > 0) {
-			int len = count;
+			int len = size_inside_page(p, count);
 
-			if (len > PAGE_SIZE)
-				len = PAGE_SIZE;
+			if (!is_vmalloc_or_module_addr((void *)p)) {
+				err = -ENXIO;
+				break;
+			}
 			if (len) {
 				written = copy_from_user(kbuf, buf, len);
 				if (written) {
-					if (wrote + virtr)
-						break;
-					free_page((unsigned long)kbuf);
-					return -EFAULT;
+					err = -EFAULT;
+					break;
 				}
 			}
-			len = vwrite(kbuf, (char *)p, len);
+			vwrite(kbuf, (char *)p, len);
 			count -= len;
 			buf += len;
 			virtr += len;
@@ -600,8 +614,8 @@ static ssize_t write_kmem(struct file * file, const char __user * buf,
 		free_page((unsigned long)kbuf);
 	}
 
- 	*ppos = p;
- 	return virtr + wrote;
+	*ppos = p;
+	return virtr + wrote ? : err;
 }
 #endif
 
@@ -774,6 +788,7 @@ static int open_port(struct inode * inode, struct file * filp)
 #define open_kmem	open_mem
 #define open_oldmem	open_mem
 
+#ifndef ARCH_HAS_DEV_MEM
 static const struct file_operations mem_fops = {
 	.llseek		= memory_lseek,
 	.read		= read_mem,
@@ -782,6 +797,9 @@ static const struct file_operations mem_fops = {
 	.open		= open_mem,
 	.get_unmapped_area = get_unmapped_area_mem,
 };
+#else
+extern const struct file_operations mem_fops;
+#endif
 
 #ifdef CONFIG_DEVKMEM
 static const struct file_operations kmem_fops = {
@@ -820,10 +838,11 @@ static const struct file_operations zero_fops = {
 /*
  * capabilities for /dev/zero
  * - permits private mappings, "copies" are taken of the source of zeros
+ * - no writeback happens
  */
 static struct backing_dev_info zero_bdi = {
 	.name		= "char/mem",
-	.capabilities	= BDI_CAP_MAP_COPY,
+	.capabilities	= BDI_CAP_MAP_COPY | BDI_CAP_NO_ACCT_AND_WRITEBACK,
 };
 
 static const struct file_operations full_fops = {
