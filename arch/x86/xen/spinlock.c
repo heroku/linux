@@ -23,7 +23,6 @@ static struct xen_spinlock_stats
 	u32 taken_slow_nested;
 	u32 taken_slow_pickup;
 	u32 taken_slow_spurious;
-	u32 taken_slow_irqenable;
 
 	u64 released;
 	u32 released_slow;
@@ -181,7 +180,7 @@ static inline void unspinning_lock(struct xen_spinlock *xl, struct xen_spinlock 
 	__get_cpu_var(lock_spinners) = prev;
 }
 
-static noinline int xen_spin_lock_slow(struct raw_spinlock *lock, bool irq_enable)
+static noinline int xen_spin_lock_slow(struct arch_spinlock *lock)
 {
 	struct xen_spinlock *xl = (struct xen_spinlock *)lock;
 	struct xen_spinlock *prev;
@@ -202,8 +201,6 @@ static noinline int xen_spin_lock_slow(struct raw_spinlock *lock, bool irq_enabl
 	ADD_STATS(taken_slow_nested, prev != NULL);
 
 	do {
-		unsigned long flags;
-
 		/* clear pending */
 		xen_clear_irq_pending(irq);
 
@@ -223,12 +220,6 @@ static noinline int xen_spin_lock_slow(struct raw_spinlock *lock, bool irq_enabl
 			goto out;
 		}
 
-		flags = __raw_local_save_flags();
-		if (irq_enable) {
-			ADD_STATS(taken_slow_irqenable, 1);
-			raw_local_irq_enable();
-		}
-
 		/*
 		 * Block until irq becomes pending.  If we're
 		 * interrupted at this point (after the trylock but
@@ -239,8 +230,6 @@ static noinline int xen_spin_lock_slow(struct raw_spinlock *lock, bool irq_enabl
 		 * pending.
 		 */
 		xen_poll_irq(irq);
-
-		raw_local_irq_restore(flags);
 
 		ADD_STATS(taken_slow_spurious, !xen_test_irq_pending(irq));
 	} while (!xen_test_irq_pending(irq)); /* check for spurious wakeups */
@@ -254,7 +243,7 @@ out:
 	return ret;
 }
 
-static inline void __xen_spin_lock(struct raw_spinlock *lock, bool irq_enable)
+static inline void __xen_spin_lock(struct raw_spinlock *lock)
 {
 	struct xen_spinlock *xl = (struct xen_spinlock *)lock;
 	unsigned timeout;
@@ -286,14 +275,14 @@ static inline void __xen_spin_lock(struct raw_spinlock *lock, bool irq_enable)
 		spin_time_accum_spinning(start_spin_fast);
 
 	} while (unlikely(oldval != 0 &&
-			  (TIMEOUT == ~0 || !xen_spin_lock_slow(lock, irq_enable))));
+			  (TIMEOUT == ~0 || !xen_spin_lock_slow(lock))));
 
 	spin_time_accum_total(start_spin);
 }
 
 static void xen_spin_lock(struct raw_spinlock *lock)
 {
-	__xen_spin_lock(lock, false);
+	__xen_spin_lock(lock);
 }
 
 static void xen_spin_lock_flags(struct raw_spinlock *lock, unsigned long flags)
@@ -405,8 +394,6 @@ static int __init xen_spinlock_debugfs(void)
 			   &spinlock_stats.taken_slow_pickup);
 	debugfs_create_u32("taken_slow_spurious", 0444, d_spin_debug,
 			   &spinlock_stats.taken_slow_spurious);
-	debugfs_create_u32("taken_slow_irqenable", 0444, d_spin_debug,
-			   &spinlock_stats.taken_slow_irqenable);
 
 	debugfs_create_u64("released", 0444, d_spin_debug, &spinlock_stats.released);
 	debugfs_create_u32("released_slow", 0444, d_spin_debug,
