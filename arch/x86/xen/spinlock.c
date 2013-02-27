@@ -287,7 +287,7 @@ static void xen_spin_lock(struct raw_spinlock *lock)
 
 static void xen_spin_lock_flags(struct raw_spinlock *lock, unsigned long flags)
 {
-	__xen_spin_lock(lock, !raw_irqs_disabled_flags(flags));
+	__xen_spin_lock(lock);
 }
 
 static noinline void xen_spin_unlock_slow(struct xen_spinlock *xl)
