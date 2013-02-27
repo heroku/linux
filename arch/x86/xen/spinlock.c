@@ -11,6 +11,7 @@
 
 #include <xen/interface/xen.h>
 #include <xen/events.h>
+#include <xen/evtchn.h>
 
 #include "xen-ops.h"
 #include "debugfs.h"
