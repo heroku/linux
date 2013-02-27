@@ -1,3 +1,11 @@
+linux-ec2 (2.6.32-350.61heroku2) heroku; urgency=low
+
+  [ Bryon Roché ]
+
+  * Shift to pvops kernel
+
+ -- Bryon Roché <bryon@heroku.com>  Tue, 26 Feb 2013 18:04:51 -0800
+
 linux-ec2 (2.6.32-350.61heroku1) heroku; urgency=low
 
   [ Bryon Roché ]
