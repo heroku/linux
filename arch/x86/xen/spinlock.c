@@ -11,7 +11,18 @@
 
 #include <xen/interface/xen.h>
 #include <xen/events.h>
-#include <xen/evtchn.h>
+/* Clear an irq's pending state, in preparation for polling on it. */
+void xen_clear_irq_pending(int irq);
+
+/* Set an irq's pending state, to avoid blocking on it. */
+void xen_set_irq_pending(int irq);
+
+/* Test an irq's pending state. */
+int xen_test_irq_pending(int irq);
+
+/* Poll waiting for an irq to become pending.  In the usual case, the
+   irq will be disabled so it won't deliver an interrupt. */
+void xen_poll_irq(int irq);
 
 #include "xen-ops.h"
 #include "debugfs.h"

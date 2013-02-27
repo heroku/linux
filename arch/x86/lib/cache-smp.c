@@ -1,6 +1,8 @@
 #include <linux/smp.h>
 #include <linux/module.h>
 #include <asm/hypervisor.h>
+#include <xen/interface/xen.h>
+#include <asm/xen/hypercall.h>
 
 static void __wbinvd(void *dummy)
 {
